@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Courier New", monospace; background: #fff; color: #000; }
+  header { border-bottom: 2px solid #000; padding: 12px 16px; }
+  header h1 { margin: 0 0 10px; font-size: 18px; letter-spacing: 2px; text-transform: uppercase; }
+  nav a { display: inline-block; color: #000; text-decoration: none; border: 2px solid #000; padding: 6px 14px; margin: 0 6px 6px 0; }
+  nav a.on { background: #000; color: #fff; }
+  nav.sub { padding: 12px 16px 0; }
+  nav.sub a { border-width: 1px; padding: 4px 12px; font-size: 14px; }
+  main { padding: 16px; max-width: 900px; }
+  h2 { margin: 0 0 4px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; }
+  .big { font-size: 40px; font-weight: bold; margin: 0 0 16px; }
+  form { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 20px; }
+  input { font: inherit; border: 2px solid #000; padding: 6px 8px; background: #fff; color: #000; }
+  button { font: inherit; border: 2px solid #000; background: #000; color: #fff; padding: 6px 14px; cursor: pointer; }
+  button:hover { background: #fff; color: #000; }
+  button.sm { padding: 2px 8px; font-size: 12px; background: #fff; color: #000; }
+  button.sm:hover { background: #000; color: #fff; }
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 20px; }
+  th, td { border: 1px solid #000; padding: 6px 8px; text-align: left; }
+  th { background: #000; color: #fff; font-weight: normal; text-transform: uppercase; font-size: 12px; }
+  td.r, th.r { text-align: right; }
+  canvas { border: 2px solid #000; width: 100%; max-width: 700px; display: block; margin: 8px 0 20px; }
+  .tip { border: 2px dashed #000; padding: 10px 12px; margin: 8px 0; }
+  .muted { font-size: 13px; }
+  .legend { margin: 0 0 20px; padding: 0; list-style: none; }
+  .legend li { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
+  .legend canvas { width: 22px; height: 22px; border: 1px solid #000; margin: 0; display: inline-block; }
+  .bar { display: inline-block; height: 12px; background: #000; vertical-align: middle; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ledger</h1>
+  <nav id="top">
+    <a href="#capital" data-k="capital">Capital</a>
+    <a href="#expenditure" data-k="expenditure">Expenditure</a>
+    <a href="#creditors" data-k="creditors">Creditors</a>
+    <a href="#debtors" data-k="debtors">Debtors</a>
+  </nav>
+</header>
+<div id="subnav"></div>
+<main id="view"></main>
+
+<script>
+/* ---------- data ---------- */
+const KEY = "ledger-v1";
+let S = { deposits: [], withdrawals: [], payments: [], creditors: [], debtors: [] };
+try { Object.assign(S, JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+
+const $ = s => document.querySelector(s);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const toLocal = d => { const p = n => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+const nowLocal = () => toLocal(new Date());
+const fmtDT = s => String(s || "").replace("T", " ");
+const fmt = n => Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const sum = a => a.reduce((t, x) => t + x.amount, 0);
+const balance = () => sum(S.deposits) - sum(S.withdrawals) - sum(S.payments);
+
+/* ---------- charts ---------- */
+function setup(c, w, h) {
+  const d = window.devicePixelRatio || 1;
+  c.width = w * d; c.height = h * d;
+  const x = c.getContext("2d"); x.scale(d, d);
+  x.fillStyle = "#fff"; x.fillRect(0, 0, w, h);
+  x.fillStyle = "#000"; x.strokeStyle = "#000"; x.font = "12px 'Courier New', monospace";
+  return x;
+}
+
+function lineChart(c, items) {
+  const W = 700, H = 280, x = setup(c, W, H);
+  if (!items.length) { x.textAlign = "center"; x.fillText("no data yet", W / 2, H / 2); return; }
+  const pts = items.map(i => ({ t: new Date(i.date).getTime(), y: i.amount })).sort((a, b) => a.t - b.t);
+  const L = 70, R = 20, T = 20, B = 40;
+  const minT = pts[0].t, maxT = pts[pts.length - 1].t;
+  const maxY = Math.max(...pts.map(p => p.y)) * 1.1 || 1;
+  const px = t => maxT === minT ? (L + W - R) / 2 : L + (t - minT) / (maxT - minT) * (W - L - R);
+  const py = v => H - B - v / maxY * (H - T - B);
+  x.lineWidth = 1;
+  x.beginPath(); x.moveTo(L, T); x.lineTo(L, H - B); x.lineTo(W - R, H - B); x.stroke();
+  x.textAlign = "right";
+  for (let i = 0; i <= 4; i++) {
+    const v = maxY * i / 4;
+    x.fillText(Math.round(v).toLocaleString(), L - 6, py(v) + 4);
+    x.save(); x.setLineDash([2, 4]); x.beginPath(); x.moveTo(L, py(v)); x.lineTo(W - R, py(v)); x.stroke(); x.restore();
+  }
+  x.textAlign = "left"; x.fillText(fmtDT(toLocal(new Date(minT))), L, H - 18);
+  x.textAlign = "right"; x.fillText(fmtDT(toLocal(new Date(maxT))), W - R, H - 18);
+  x.lineWidth = 2; x.beginPath();
+  pts.forEach((p, i) => i ? x.lineTo(px(p.t), py(p.y)) : x.moveTo(px(p.t), py(p.y)));
+  x.stroke();
+  pts.forEach(p => { x.beginPath(); x.arc(px(p.t), py(p.y), 4, 0, 7); x.fill(); });
+}
+
+function pattern(i, size) {
+  const p = document.createElement("canvas"); p.width = p.height = size;
+  const g = p.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, size, size);
+  g.fillStyle = g.strokeStyle = "#000"; g.lineWidth = 1.5;
+  const k = i % 8, s = size;
+  if (k === 1) { g.fillRect(0, 0, s, s); }
+  else if (k === 2) { g.beginPath(); g.moveTo(0, s); g.lineTo(s, 0); g.moveTo(-2, 2); g.lineTo(2, -2); g.moveTo(s - 2, s + 2); g.lineTo(s + 2, s - 2); g.stroke(); }
+  else if (k === 3) { g.beginPath(); g.arc(s / 2, s / 2, s / 6, 0, 7); g.fill(); }
+  else if (k === 4) { g.beginPath(); g.moveTo(0, s / 2); g.lineTo(s, s / 2); g.stroke(); }
+  else if (k === 5) { g.beginPath(); g.moveTo(s / 2, 0); g.lineTo(s / 2, s); g.moveTo(0, s / 2); g.lineTo(s, s / 2); g.stroke(); }
+  else if (k === 6) { g.beginPath(); g.moveTo(0, 0); g.lineTo(s, s); g.moveTo(2, -2); g.lineTo(s + 2, s - 2); g.moveTo(-2, s - 2); g.lineTo(s - 2, s + 2); g.stroke(); }
+  else if (k === 7) { g.fillRect(0, 0, s / 2, s / 2); g.fillRect(s / 2, s / 2, s / 2, s / 2); }
+  return p;
+}
+
+function pieChart(c, legendEl, items) {
+  const W = 360, H = 360, x = setup(c, W, H);
+  const total = sum(items);
+  if (!total) { x.textAlign = "center"; x.fillText("no data yet", W / 2, H / 2); legendEl.innerHTML = ""; return; }
+  let a = -Math.PI / 2;
+  items.forEach((it, i) => {
+    const ang = it.amount / total * Math.PI * 2;
+    x.beginPath(); x.moveTo(W / 2, H / 2); x.arc(W / 2, H / 2, 150, a, a + ang); x.closePath();
+    x.fillStyle = x.createPattern(pattern(i, 10), "repeat"); x.fill();
+    x.lineWidth = 2; x.strokeStyle = "#000"; x.stroke();
+    a += ang;
+  });
+  legendEl.innerHTML = items.map((it, i) =>
+    `<li><canvas data-i="${i}" width="22" height="22"></canvas>${esc(it.name)} — ${fmt(it.amount)} (${(it.amount / total * 100).toFixed(1)}%)</li>`).join("");
+  legendEl.querySelectorAll("canvas").forEach(cv => {
+    const g = cv.getContext("2d"); g.fillStyle = g.createPattern(pattern(+cv.dataset.i, 10), "repeat"); g.fillRect(0, 0, 22, 22);
+  });
+}
+
+/* ---------- views ---------- */
+const view = $("#view"), subnav = $("#subnav");
+
+function sub(items, cur) {
+  subnav.innerHTML = items.length ? `<nav class="sub">${items.map(([k, label]) =>
+    `<a href="#capital/${k}" class="${k === cur ? "on" : ""}">${label}</a>`).join("")}</nav>` : "";
+}
+
+function txnPage(kind, title, verb) {
+  const list = S[kind].slice().sort((a, b) => b.date.localeCompare(a.date));
+  view.innerHTML = `
+    <h2>${title} total</h2>
+    <p class="big">${fmt(sum(S[kind]))}</p>
+    <form id="f">
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount" required>
+      <input name="note" placeholder="note (optional)">
+      <input name="date" type="datetime-local" value="${nowLocal()}" required>
+      <button>${verb}</button>
+    </form>
+    <h2>${title} over time</h2>
+    <canvas id="c"></canvas>
+    <h2>History</h2>
+    <table><tr><th>Date &amp; time</th><th>Note</th><th class="r">Amount</th><th></th></tr>
+    ${list.map(t => `<tr><td>${fmtDT(t.date)}</td><td>${esc(t.note || "")}</td><td class="r">${fmt(t.amount)}</td><td><button class="sm" data-del="${t.id}">delete</button></td></tr>`).join("") || `<tr><td colspan="4">nothing yet</td></tr>`}
+    </table>`;
+  lineChart($("#c"), S[kind]);
+  $("#f").onsubmit = e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    S[kind].push({ id: uid(), amount: +f.get("amount"), note: f.get("note").trim(), date: f.get("date") });
+    save(); render();
+  };
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S[kind] = S[kind].filter(t => t.id !== b.dataset.del); save(); render(); });
+}
+
+function expenditurePage() {
+  const list = S.payments.slice().sort((a, b) => b.date.localeCompare(a.date));
+  // analytics: group by item (falls back to vendor)
+  const DAY = 864e5, now = Date.now();
+  const groups = {};
+  S.payments.forEach(p => {
+    const key = (p.item || p.vendor).toLowerCase();
+    (groups[key] = groups[key] || { name: p.item || p.vendor, vendors: new Set(), rows: [] });
+    groups[key].vendors.add(p.vendor); groups[key].rows.push(p);
+  });
+  const stats = Object.values(groups).map(g => {
+    const ts = g.rows.map(r => new Date(r.date).getTime()).sort((a, b) => a - b);
+    const weekCount = ts.filter(t => now - t <= 7 * DAY).length;
+    const spanDays = Math.max(1, (ts[ts.length - 1] - ts[0]) / DAY + 1);
+    return { name: g.name, vendors: [...g.vendors].join(", "), count: g.rows.length, total: sum(g.rows), weekCount, perWeek: g.rows.length / (spanDays / 7) };
+  }).sort((a, b) => b.count - a.count);
+  const maxC = Math.max(1, ...stats.map(s => s.count));
+  const tips = stats.filter(s => s.weekCount >= 3 || (s.count >= 3 && s.perWeek >= 3));
+  view.innerHTML = `
+    <h2>Total expenditure</h2>
+    <p class="big">${fmt(sum(S.payments))}</p>
+    <h2>Add expenditure</h2>
+    <form id="ef">
+      <input name="vendor" placeholder="vendor name" required>
+      <input name="item" placeholder="item type (e.g. milk)" required>
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="price" required>
+      <input name="date" type="datetime-local" value="${nowLocal()}" required>
+      <button>Add</button>
+    </form>
+    <h2>Expenditure over time</h2>
+    <canvas id="c"></canvas>
+    <h2>Spent per vendor</h2>
+    <canvas id="c2" style="max-width:360px"></canvas>
+    <ul class="legend" id="lg"></ul>
+    <h2>Spending advice</h2>
+    ${tips.length ? tips.map(s => `<div class="tip">You paid for <b>${esc(s.name)}</b> ${s.weekCount >= 3 ? s.weekCount + " times in the last 7 days" : "about " + s.perWeek.toFixed(1) + " times a week"} (${esc(s.vendors)}). Total spent: ${fmt(s.total)}. Consider buying in bulk so it lasts you longer.</div>`).join("")
+      : `<p class="muted">No repeat habits spotted yet. Keep recording payments — items you buy 3+ times a week will show up here.</p>`}
+    <h2>Frequency by item</h2>
+    <table><tr><th>Item</th><th>Vendor(s)</th><th>Times</th><th></th><th class="r">Total</th></tr>
+    ${stats.map(s => `<tr><td>${esc(s.name)}</td><td>${esc(s.vendors)}</td><td>${s.count}</td><td><span class="bar" style="width:${s.count / maxC * 120}px"></span></td><td class="r">${fmt(s.total)}</td></tr>`).join("") || `<tr><td colspan="5">nothing yet</td></tr>`}
+    </table>
+    <h2>Payment history</h2>
+    <table><tr><th>Date &amp; time</th><th>Vendor</th><th>Item</th><th class="r">Amount</th><th></th></tr>
+    ${list.map(p => `<tr><td>${fmtDT(p.date)}</td><td>${esc(p.vendor)}</td><td>${esc(p.item || "")}</td><td class="r">${fmt(p.amount)}</td><td><button class="sm" data-del="${p.id}">delete</button></td></tr>`).join("") || `<tr><td colspan="5">nothing yet</td></tr>`}
+    </table>`;
+  $("#ef").onsubmit = e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    S.payments.push({ id: uid(), vendor: f.get("vendor").trim(), item: f.get("item").trim(), amount: +f.get("amount"), date: f.get("date") });
+    save(); render();
+  };
+  lineChart($("#c"), S.payments);
+  const byVendor = {};
+  S.payments.forEach(p => { const k = p.vendor.toLowerCase(); (byVendor[k] = byVendor[k] || { name: p.vendor, amount: 0 }).amount += p.amount; });
+  pieChart($("#c2"), $("#lg"), Object.values(byVendor).sort((a, b) => b.amount - a.amount));
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S.payments = S.payments.filter(t => t.id !== b.dataset.del); save(); render(); });
+}
+
+function payPage() {
+  const recent = S.payments.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  view.innerHTML = `
+    <h2>Pay</h2>
+    <p class="muted">Available balance: ${fmt(balance())}</p>
+    <form id="f">
+      <input name="vendor" placeholder="vendor / who you paid" required>
+      <input name="item" placeholder="item or service (e.g. milk)">
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount" required>
+      <input name="date" type="datetime-local" value="${nowLocal()}" required>
+      <button>Pay</button>
+    </form>
+    <h2>Recent payments</h2>
+    <table><tr><th>Date &amp; time</th><th>Vendor</th><th>Item</th><th class="r">Amount</th></tr>
+    ${recent.map(p => `<tr><td>${fmtDT(p.date)}</td><td>${esc(p.vendor)}</td><td>${esc(p.item || "")}</td><td class="r">${fmt(p.amount)}</td></tr>`).join("") || `<tr><td colspan="4">nothing yet</td></tr>`}
+    </table>
+    <p class="muted"><a href="#expenditure" style="color:#000">See full expenditure history and spending advice →</a></p>`;
+  $("#f").onsubmit = e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    S.payments.push({ id: uid(), vendor: f.get("vendor").trim(), item: f.get("item").trim(), amount: +f.get("amount"), date: f.get("date") });
+    save(); render();
+  };
+}
+
+function capitalHome() {
+  view.innerHTML = `
+    <h2>Capital / balance</h2>
+    <p class="big">${fmt(balance())}</p>
+    <table>
+      <tr><td>Total deposited</td><td class="r">${fmt(sum(S.deposits))}</td></tr>
+      <tr><td>Total withdrawn</td><td class="r">${fmt(sum(S.withdrawals))}</td></tr>
+      <tr><td>Total paid out</td><td class="r">${fmt(sum(S.payments))}</td></tr>
+    </table>
+    <p class="muted">Use the buttons above to deposit, withdraw or pay.</p>`;
+}
+
+function peoplePage(kind, title, totalLabel, settleLabel, addLabel) {
+  const items = S[kind].filter(p => p.amount > 0).sort((a, b) => b.amount - a.amount);
+  view.innerHTML = `
+    <h2>${totalLabel}</h2>
+    <p class="big">${fmt(sum(items))}</p>
+    <form id="f">
+      <input name="name" placeholder="person's name" required>
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount" required>
+      <button>${addLabel}</button>
+    </form>
+    <h2>${title} breakdown</h2>
+    <canvas id="c"></canvas>
+    <ul class="legend" id="lg"></ul>
+    <table><tr><th>Name</th><th>Date &amp; time</th><th class="r">Amount</th><th></th></tr>
+    ${items.map(p => `<tr><td>${esc(p.name)}</td><td>${fmtDT(p.date)}</td><td class="r">${fmt(p.amount)}</td><td><button class="sm" data-settle="${p.id}">${settleLabel}</button> <button class="sm" data-del="${p.id}">delete</button></td></tr>`).join("") || `<tr><td colspan="4">nobody yet</td></tr>`}
+    </table>`;
+  pieChart($("#c"), $("#lg"), items);
+  $("#f").onsubmit = e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    const name = f.get("name").trim(), amt = +f.get("amount");
+    const ex = S[kind].find(p => p.name.toLowerCase() === name.toLowerCase());
+    if (ex) { ex.amount += amt; ex.date = nowLocal(); } else S[kind].push({ id: uid(), name, amount: amt, date: nowLocal() });
+    save(); render();
+  };
+  view.querySelectorAll("[data-settle]").forEach(b => b.onclick = () => {
+    const p = S[kind].find(x => x.id === b.dataset.settle);
+    const v = prompt(`${settleLabel} — how much? (owing ${fmt(p.amount)})`, p.amount);
+    const n = parseFloat(v);
+    if (!n || n <= 0) return;
+    p.amount = Math.max(0, p.amount - n);
+    if (!p.amount) S[kind] = S[kind].filter(x => x.id !== p.id);
+    save(); render();
+  });
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S[kind] = S[kind].filter(t => t.id !== b.dataset.del); save(); render(); });
+}
+
+/* ---------- router ---------- */
+function render() {
+  const [sec, part] = (location.hash.slice(1) || "capital").split("/");
+  document.querySelectorAll("#top a").forEach(a => a.classList.toggle("on", a.dataset.k === sec));
+  if (sec === "capital") {
+    sub([["deposit", "Deposit money"], ["withdraw", "Withdraw money"], ["pay", "Pay"]], part);
+    if (part === "deposit") txnPage("deposits", "Deposits", "Deposit");
+    else if (part === "withdraw") txnPage("withdrawals", "Withdrawals", "Withdraw");
+    else if (part === "pay") payPage();
+    else capitalHome();
+  } else if (sec === "expenditure") {
+    sub([]); expenditurePage();
+  } else if (sec === "creditors") {
+    sub([]); peoplePage("creditors", "Creditors", "Total I owe", "I paid", "Add");
+  } else if (sec === "debtors") {
+    sub([]); peoplePage("debtors", "Debtors", "Total I am owed", "They paid", "Add");
+  }
+}
+addEventListener("hashchange", render);
+render();
+</script>
+</body>
+</html>
