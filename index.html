@@ -8,7 +8,8 @@
   * { box-sizing: border-box; }
   body { margin: 0; font-family: "Courier New", monospace; background: #fff; color: #000; }
   header { border-bottom: 2px solid #000; padding: 12px 16px; }
-  header h1 { margin: 0 0 10px; font-size: 18px; letter-spacing: 2px; text-transform: uppercase; }
+  .bar2 { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+  header h1 { margin: 0; font-size: 18px; letter-spacing: 2px; text-transform: uppercase; }
   nav a { display: inline-block; color: #000; text-decoration: none; border: 2px solid #000; padding: 6px 14px; margin: 0 6px 6px 0; }
   nav a.on { background: #000; color: #fff; }
   nav.sub { padding: 12px 16px 0; }
@@ -22,6 +23,8 @@
   button:hover { background: #fff; color: #000; }
   button.sm { padding: 2px 8px; font-size: 12px; background: #fff; color: #000; }
   button.sm:hover { background: #000; color: #fff; }
+  button.alt { background: #fff; color: #000; }
+  button.alt:hover { background: #000; color: #fff; }
   table { border-collapse: collapse; width: 100%; margin: 8px 0 20px; }
   th, td { border: 1px solid #000; padding: 6px 8px; text-align: left; }
   th { background: #000; color: #fff; font-weight: normal; text-transform: uppercase; font-size: 12px; }
@@ -29,15 +32,18 @@
   canvas { border: 2px solid #000; width: 100%; max-width: 700px; display: block; margin: 8px 0 20px; }
   .tip { border: 2px dashed #000; padding: 10px 12px; margin: 8px 0; }
   .muted { font-size: 13px; }
+  .msg { border: 2px solid #000; background: #000; color: #fff; padding: 8px 16px; font-size: 14px; }
   .legend { margin: 0 0 20px; padding: 0; list-style: none; }
   .legend li { display: flex; align-items: center; gap: 8px; margin: 4px 0; }
   .legend canvas { width: 22px; height: 22px; border: 1px solid #000; margin: 0; display: inline-block; }
   .bar { display: inline-block; height: 12px; background: #000; vertical-align: middle; }
+  @media (max-width: 520px) { .big { font-size: 32px; } input { flex: 1 1 100%; } }
 </style>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
 </head>
 <body>
 <header>
-  <h1>Ledger</h1>
+  <div class="bar2"><h1>Ledger</h1><div id="who" class="muted"></div></div>
   <nav id="top">
     <a href="#capital" data-k="capital">Capital</a>
     <a href="#expenditure" data-k="expenditure">Expenditure</a>
@@ -45,25 +51,98 @@
     <a href="#debtors" data-k="debtors">Debtors</a>
   </nav>
 </header>
+<div id="msg" class="msg" hidden></div>
 <div id="subnav"></div>
 <main id="view"></main>
 
 <script>
-/* ---------- data ---------- */
-const KEY = "ledger-v1";
-let S = { deposits: [], withdrawals: [], payments: [], creditors: [], debtors: [] };
-try { Object.assign(S, JSON.parse(localStorage.getItem(KEY)) || {}); } catch (e) {}
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) {} };
+/* =====================================================================
+   SETUP: paste your Supabase project details here (Project Settings > API).
+   Leave both empty to run in local mode (data stays in this browser).
+   The anon/publishable key is safe to put in a web page; your data is
+   protected by the row-level security rules in supabase-schema.sql.
+   ===================================================================== */
+const SUPABASE_URL = "";       // e.g. "https://abcdxyz.supabase.co"
+const SUPABASE_ANON_KEY = "";  // the anon / publishable key
 
+/* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const uuid = () => crypto.randomUUID ? crypto.randomUUID()
+  : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => { const r = crypto.getRandomValues(new Uint8Array(1))[0] % 16; return (c === "x" ? r : (r & 3 | 8)).toString(16); });
 const toLocal = d => { const p = n => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
 const nowLocal = () => toLocal(new Date());
+const toIso = s => { const d = new Date(s); return isNaN(d) ? new Date().toISOString() : d.toISOString(); };
 const fmtDT = s => String(s || "").replace("T", " ");
 const fmt = n => Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const sum = a => a.reduce((t, x) => t + x.amount, 0);
-const balance = () => sum(S.deposits) - sum(S.withdrawals) - sum(S.payments);
+const round2 = n => Math.round(n * 100) / 100;
+
+function flash(m) {
+  const e = $("#msg"); e.textContent = m; e.hidden = false;
+  clearTimeout(flash.t); flash.t = setTimeout(() => { e.hidden = true; }, 9000);
+}
+
+/* ---------- data layer (cloud or local) ---------- */
+const KINDS = ["deposits", "withdrawals", "payments", "creditors", "debtors"];
+const FIELDS = {
+  deposits: ["amount", "note", "date"], withdrawals: ["amount", "note", "date"],
+  payments: ["vendor", "item", "amount", "date"],
+  creditors: ["name", "amount", "date"], debtors: ["name", "amount", "date"]
+};
+const TEXT = new Set(["note", "item", "vendor", "name"]);
+const LKEY = "ledger-v1";
+const blank = () => ({ deposits: [], withdrawals: [], payments: [], creditors: [], debtors: [] });
+let S = blank(), user = null, ready = true, loadedFor = null;
+
+const wantCloud = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+const cloud = wantCloud && window.supabase ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+if (wantCloud && !cloud) setTimeout(() => flash("Could not load the Supabase library (offline?). Running in local mode."), 0);
+if (cloud) ready = false;
+
+const localLoad = () => { try { return Object.assign(blank(), JSON.parse(localStorage.getItem(LKEY)) || {}); } catch (e) { return blank(); } };
+const localSave = () => { try { localStorage.setItem(LKEY, JSON.stringify(S)); } catch (e) {} };
+
+const toRow = (kind, o) => {
+  const r = { id: o.id };
+  FIELDS[kind].forEach(k => { r[k] = k === "date" ? toIso(o.date) : TEXT.has(k) ? (o[k] || "") : o[k]; });
+  return r;
+};
+const fromRow = (kind, r) => {
+  const o = { id: r.id };
+  FIELDS[kind].forEach(k => { o[k] = k === "date" ? toLocal(new Date(r.date)) : k === "amount" ? Number(r.amount) : r[k]; });
+  return o;
+};
+
+async function run(p) {
+  const { error } = await p;
+  if (error) { flash("Could not save: " + error.message); await loadAll(); render(); }
+}
+async function loadAll() {
+  const res = await Promise.all(KINDS.map(k => cloud.from(k).select("*").order("date", { ascending: true })));
+  const bad = res.find(r => r.error);
+  if (bad) { flash("Could not load data: " + bad.error.message); return false; }
+  KINDS.forEach((k, i) => { S[k] = res[i].data.map(r => fromRow(k, r)); });
+  return true;
+}
+function add(kind, o) {
+  o.id = uuid(); S[kind].push(o);
+  if (cloud) run(cloud.from(kind).insert(toRow(kind, o))); else localSave();
+}
+function remove(kind, id) {
+  S[kind] = S[kind].filter(x => x.id !== id);
+  if (cloud) run(cloud.from(kind).delete().eq("id", id)); else localSave();
+}
+function update(kind, o, patch) {
+  Object.assign(o, patch);
+  if (cloud) {
+    const r = {}; Object.keys(patch).forEach(k => { r[k] = k === "date" ? toIso(patch[k]) : patch[k]; });
+    run(cloud.from(kind).update(r).eq("id", o.id));
+  } else localSave();
+}
+
+const sumKind = k => sum(S[k]);
+const balance = () => sumKind("deposits") - sumKind("withdrawals") - sumKind("payments");
 
 /* ---------- charts ---------- */
 function setup(c, w, h) {
@@ -143,11 +222,37 @@ function sub(items, cur) {
     `<a href="#capital/${k}" class="${k === cur ? "on" : ""}">${label}</a>`).join("")}</nav>` : "";
 }
 
+function authPage() {
+  subnav.innerHTML = "";
+  view.innerHTML = `
+    <h2>Sign in</h2>
+    <p class="muted">Your ledger is stored privately in your account, so it follows you across devices.</p>
+    <form id="af">
+      <input name="email" type="email" placeholder="email" required autocomplete="email">
+      <input name="password" type="password" placeholder="password (min 6 characters)" required minlength="6" autocomplete="current-password">
+      <button>Sign in</button>
+      <button type="button" class="alt" id="su">Create account</button>
+    </form>`;
+  const form = $("#af");
+  const creds = () => { const f = new FormData(form); return { email: f.get("email").trim(), password: f.get("password") }; };
+  form.onsubmit = async e => {
+    e.preventDefault();
+    const { error } = await cloud.auth.signInWithPassword(creds());
+    if (error) flash(error.message);
+  };
+  $("#su").onclick = async () => {
+    if (!form.reportValidity()) return;
+    const { data, error } = await cloud.auth.signUp(creds());
+    if (error) return flash(error.message);
+    if (!data.session) flash("Account created. Check your email to confirm it, then sign in.");
+  };
+}
+
 function txnPage(kind, title, verb) {
   const list = S[kind].slice().sort((a, b) => b.date.localeCompare(a.date));
   view.innerHTML = `
     <h2>${title} total</h2>
-    <p class="big">${fmt(sum(S[kind]))}</p>
+    <p class="big">${fmt(sumKind(kind))}</p>
     <form id="f">
       <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount" required>
       <input name="note" placeholder="note (optional)">
@@ -163,15 +268,31 @@ function txnPage(kind, title, verb) {
   lineChart($("#c"), S[kind]);
   $("#f").onsubmit = e => {
     e.preventDefault(); const f = new FormData(e.target);
-    S[kind].push({ id: uid(), amount: +f.get("amount"), note: f.get("note").trim(), date: f.get("date") });
-    save(); render();
+    add(kind, { amount: +f.get("amount"), note: f.get("note").trim(), date: f.get("date") });
+    render();
   };
-  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S[kind] = S[kind].filter(t => t.id !== b.dataset.del); save(); render(); });
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { remove(kind, b.dataset.del); render(); });
+}
+
+function paymentForm(id, btn, itemRequired) {
+  return `<form id="${id}">
+      <input name="vendor" placeholder="vendor name" required>
+      <input name="item" placeholder="item type (e.g. milk)" ${itemRequired ? "required" : ""}>
+      <input name="amount" type="number" step="0.01" min="0.01" placeholder="price" required>
+      <input name="date" type="datetime-local" value="${nowLocal()}" required>
+      <button>${btn}</button>
+    </form>`;
+}
+function bindPayment(id) {
+  $("#" + id).onsubmit = e => {
+    e.preventDefault(); const f = new FormData(e.target);
+    add("payments", { vendor: f.get("vendor").trim(), item: f.get("item").trim(), amount: +f.get("amount"), date: f.get("date") });
+    render();
+  };
 }
 
 function expenditurePage() {
   const list = S.payments.slice().sort((a, b) => b.date.localeCompare(a.date));
-  // analytics: group by item (falls back to vendor)
   const DAY = 864e5, now = Date.now();
   const groups = {};
   S.payments.forEach(p => {
@@ -189,15 +310,9 @@ function expenditurePage() {
   const tips = stats.filter(s => s.weekCount >= 3 || (s.count >= 3 && s.perWeek >= 3));
   view.innerHTML = `
     <h2>Total expenditure</h2>
-    <p class="big">${fmt(sum(S.payments))}</p>
+    <p class="big">${fmt(sumKind("payments"))}</p>
     <h2>Add expenditure</h2>
-    <form id="ef">
-      <input name="vendor" placeholder="vendor name" required>
-      <input name="item" placeholder="item type (e.g. milk)" required>
-      <input name="amount" type="number" step="0.01" min="0.01" placeholder="price" required>
-      <input name="date" type="datetime-local" value="${nowLocal()}" required>
-      <button>Add</button>
-    </form>
+    ${paymentForm("ef", "Add", true)}
     <h2>Expenditure over time</h2>
     <canvas id="c"></canvas>
     <h2>Spent per vendor</h2>
@@ -214,16 +329,12 @@ function expenditurePage() {
     <table><tr><th>Date &amp; time</th><th>Vendor</th><th>Item</th><th class="r">Amount</th><th></th></tr>
     ${list.map(p => `<tr><td>${fmtDT(p.date)}</td><td>${esc(p.vendor)}</td><td>${esc(p.item || "")}</td><td class="r">${fmt(p.amount)}</td><td><button class="sm" data-del="${p.id}">delete</button></td></tr>`).join("") || `<tr><td colspan="5">nothing yet</td></tr>`}
     </table>`;
-  $("#ef").onsubmit = e => {
-    e.preventDefault(); const f = new FormData(e.target);
-    S.payments.push({ id: uid(), vendor: f.get("vendor").trim(), item: f.get("item").trim(), amount: +f.get("amount"), date: f.get("date") });
-    save(); render();
-  };
+  bindPayment("ef");
   lineChart($("#c"), S.payments);
   const byVendor = {};
   S.payments.forEach(p => { const k = p.vendor.toLowerCase(); (byVendor[k] = byVendor[k] || { name: p.vendor, amount: 0 }).amount += p.amount; });
   pieChart($("#c2"), $("#lg"), Object.values(byVendor).sort((a, b) => b.amount - a.amount));
-  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S.payments = S.payments.filter(t => t.id !== b.dataset.del); save(); render(); });
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { remove("payments", b.dataset.del); render(); });
 }
 
 function payPage() {
@@ -231,35 +342,42 @@ function payPage() {
   view.innerHTML = `
     <h2>Pay</h2>
     <p class="muted">Available balance: ${fmt(balance())}</p>
-    <form id="f">
-      <input name="vendor" placeholder="vendor / who you paid" required>
-      <input name="item" placeholder="item or service (e.g. milk)">
-      <input name="amount" type="number" step="0.01" min="0.01" placeholder="amount" required>
-      <input name="date" type="datetime-local" value="${nowLocal()}" required>
-      <button>Pay</button>
-    </form>
+    ${paymentForm("f", "Pay", false)}
     <h2>Recent payments</h2>
     <table><tr><th>Date &amp; time</th><th>Vendor</th><th>Item</th><th class="r">Amount</th></tr>
     ${recent.map(p => `<tr><td>${fmtDT(p.date)}</td><td>${esc(p.vendor)}</td><td>${esc(p.item || "")}</td><td class="r">${fmt(p.amount)}</td></tr>`).join("") || `<tr><td colspan="4">nothing yet</td></tr>`}
     </table>
     <p class="muted"><a href="#expenditure" style="color:#000">See full expenditure history and spending advice →</a></p>`;
-  $("#f").onsubmit = e => {
-    e.preventDefault(); const f = new FormData(e.target);
-    S.payments.push({ id: uid(), vendor: f.get("vendor").trim(), item: f.get("item").trim(), amount: +f.get("amount"), date: f.get("date") });
-    save(); render();
-  };
+  bindPayment("f");
+}
+
+/* move data saved in this browser (local mode) into the cloud account */
+const localCount = () => { const L = localLoad(); return KINDS.reduce((n, k) => n + L[k].length, 0); };
+async function importLocal() {
+  const L = localLoad();
+  for (const k of KINDS) {
+    if (!L[k].length) continue;
+    const rows = L[k].map(o => toRow(k, { ...o, id: uuid(), date: o.date || nowLocal() }));
+    const { error } = await cloud.from(k).insert(rows);
+    if (error) return flash("Import failed: " + error.message);
+  }
+  try { localStorage.setItem(LKEY + "-imported", localStorage.getItem(LKEY)); localStorage.removeItem(LKEY); } catch (e) {}
+  await loadAll(); render(); flash("Imported your local data into your account.");
 }
 
 function capitalHome() {
+  const n = cloud ? localCount() : 0;
   view.innerHTML = `
     <h2>Capital / balance</h2>
     <p class="big">${fmt(balance())}</p>
     <table>
-      <tr><td>Total deposited</td><td class="r">${fmt(sum(S.deposits))}</td></tr>
-      <tr><td>Total withdrawn</td><td class="r">${fmt(sum(S.withdrawals))}</td></tr>
-      <tr><td>Total paid out</td><td class="r">${fmt(sum(S.payments))}</td></tr>
+      <tr><td>Total deposited</td><td class="r">${fmt(sumKind("deposits"))}</td></tr>
+      <tr><td>Total withdrawn</td><td class="r">${fmt(sumKind("withdrawals"))}</td></tr>
+      <tr><td>Total paid out</td><td class="r">${fmt(sumKind("payments"))}</td></tr>
     </table>
-    <p class="muted">Use the buttons above to deposit, withdraw or pay.</p>`;
+    <p class="muted">Use the buttons above to deposit, withdraw or pay.</p>
+    ${n ? `<div class="tip">Found ${n} entries saved in this browser from before you signed in.<br><br><button id="imp">Import them into my account</button></div>` : ""}`;
+  if (n) $("#imp").onclick = importLocal;
 }
 
 function peoplePage(kind, title, totalLabel, settleLabel, addLabel) {
@@ -283,23 +401,30 @@ function peoplePage(kind, title, totalLabel, settleLabel, addLabel) {
     e.preventDefault(); const f = new FormData(e.target);
     const name = f.get("name").trim(), amt = +f.get("amount");
     const ex = S[kind].find(p => p.name.toLowerCase() === name.toLowerCase());
-    if (ex) { ex.amount += amt; ex.date = nowLocal(); } else S[kind].push({ id: uid(), name, amount: amt, date: nowLocal() });
-    save(); render();
+    if (ex) update(kind, ex, { amount: round2(ex.amount + amt), date: nowLocal() });
+    else add(kind, { name, amount: amt, date: nowLocal() });
+    render();
   };
   view.querySelectorAll("[data-settle]").forEach(b => b.onclick = () => {
     const p = S[kind].find(x => x.id === b.dataset.settle);
     const v = prompt(`${settleLabel} — how much? (owing ${fmt(p.amount)})`, p.amount);
     const n = parseFloat(v);
     if (!n || n <= 0) return;
-    p.amount = Math.max(0, p.amount - n);
-    if (!p.amount) S[kind] = S[kind].filter(x => x.id !== p.id);
-    save(); render();
+    const left = round2(Math.max(0, p.amount - n));
+    if (!left) remove(kind, p.id); else update(kind, p, { amount: left });
+    render();
   });
-  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { S[kind] = S[kind].filter(t => t.id !== b.dataset.del); save(); render(); });
+  view.querySelectorAll("[data-del]").forEach(b => b.onclick = () => { remove(kind, b.dataset.del); render(); });
 }
 
 /* ---------- router ---------- */
 function render() {
+  $("#who").innerHTML = cloud ? (user ? `${esc(user.email)} <button class="sm" id="out">Sign out</button>` : "")
+    : "local mode · data stays in this browser";
+  const out = $("#out"); if (out) out.onclick = () => cloud.auth.signOut();
+  $("#top").hidden = !!cloud && !user;
+  if (!ready) { subnav.innerHTML = ""; view.textContent = "loading…"; return; }
+  if (cloud && !user) { authPage(); return; }
   const [sec, part] = (location.hash.slice(1) || "capital").split("/");
   document.querySelectorAll("#top a").forEach(a => a.classList.toggle("on", a.dataset.k === sec));
   if (sec === "capital") {
@@ -316,8 +441,27 @@ function render() {
     sub([]); peoplePage("debtors", "Debtors", "Total I am owed", "They paid", "Add");
   }
 }
+
+/* ---------- start ---------- */
+async function onSession(session) {
+  user = session ? session.user : null;
+  if (!user) { loadedFor = null; S = blank(); ready = true; render(); return; }
+  if (loadedFor === user.id) return;       // same user, already loaded: don't wipe forms
+  loadedFor = user.id;
+  const ok = await loadAll();
+  if (!ok) loadedFor = null;
+  ready = true; render();
+}
 addEventListener("hashchange", render);
-render();
+if (cloud) {
+  render();
+  cloud.auth.onAuthStateChange((ev, session) => {
+    if (ev === "SIGNED_IN" || ev === "SIGNED_OUT") setTimeout(() => onSession(session), 0);
+  });
+  cloud.auth.getSession().then(({ data }) => onSession(data.session));
+} else {
+  S = localLoad(); render();
+}
 </script>
 </body>
 </html>
